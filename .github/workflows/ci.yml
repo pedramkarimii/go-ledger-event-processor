@@ -29,3 +29,46 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+
+  end-to-end:
+    name: Docker end-to-end
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate Docker Compose
+        run: docker compose config
+      - name: Start stack
+        run: docker compose up -d --build
+      - name: Wait for API and consumer
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            api_ready="$(curl --fail --silent http://localhost:8084/health || true)"
+            queue_ready="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections || true)"
+            if printf '%s' "$api_ready" | grep -F '"status":"ok"' > /dev/null && printf '%s' "$queue_ready" | grep -F '"name":"go-ledger-order-projections"' > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - name: Process an order event
+        run: |
+          set -euo pipefail
+          event='{"event_key":"ci.created:order-1","event_type":"order.created","occurred_at":"2026-06-27T16:30:00Z","payload":{"order_id":"order-1","user_id":"ci-user-1","side":"buy","base_asset_code":"BTC","quote_asset_code":"USDT","reserved_asset_code":"USDT","reserved_amount":"20.000"}}'
+          request="$(jq -n --arg payload "$event" '{properties:{},routing_key:"order.created",payload:$payload,payload_encoding:"string"}')"
+          publish_response="$(curl --fail --silent --show-error -u app:app -H "content-type: application/json" --data "$request" "http://localhost:15674/api/exchanges/%2F/crypto.ledger.events/publish")"
+          printf '%s' "$publish_response" | grep -F '"routed":true' > /dev/null
+          for attempt in {1..20}; do
+            response="$(curl --fail --silent http://localhost:8084/v1/orders/order-1 || true)"
+            if printf '%s' "$response" | grep -F '"status":"open"' > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose logs
+          exit 1
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
