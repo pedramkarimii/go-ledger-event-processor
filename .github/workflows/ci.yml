@@ -40,33 +40,111 @@ jobs:
         run: docker compose config
       - name: Start stack
         run: docker compose up -d --build
-      - name: Wait for API and consumer
+      - name: Wait for API and RabbitMQ topology
         run: |
           set -euo pipefail
-          for attempt in {1..30}; do
+          for attempt in {1..45}; do
             api_ready="$(curl --fail --silent http://localhost:8084/health || true)"
-            queue_ready="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections || true)"
-            if printf '%s' "$api_ready" | grep -F '"status":"ok"' > /dev/null && printf '%s' "$queue_ready" | grep -F '"name":"go-ledger-order-projections"' > /dev/null; then
+            projection_queue="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections || true)"
+            dead_letter_queue="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections.dlq || true)"
+
+            if printf '%s' "$api_ready" | grep -F '"status":"ok"' > /dev/null \
+              && printf '%s' "$projection_queue" | grep -F '"name":"go-ledger-order-projections"' > /dev/null \
+              && printf '%s' "$dead_letter_queue" | grep -F '"name":"go-ledger-order-projections.dlq"' > /dev/null; then
               exit 0
             fi
+
             sleep 2
           done
+
           docker compose logs
           exit 1
-      - name: Process an order event
+      - name: Route invalid event to DLQ
         run: |
           set -euo pipefail
-          event='{"event_key":"ci.created:order-1","event_type":"order.created","occurred_at":"2026-06-27T16:30:00Z","payload":{"order_id":"order-1","user_id":"ci-user-1","side":"buy","base_asset_code":"BTC","quote_asset_code":"USDT","reserved_asset_code":"USDT","reserved_amount":"20.000"}}'
-          request="$(jq -n --arg payload "$event" '{properties:{},routing_key:"order.created",payload:$payload,payload_encoding:"string"}')"
+
+          invalid_event='{"event_key":'
+          invalid_request="$(python3 - "$invalid_event" <<'PY'
+          import json
+          import sys
+
+          print(json.dumps({
+              "properties": {},
+              "routing_key": "order.created",
+              "payload": sys.argv[1],
+              "payload_encoding": "string",
+          }))
+          PY
+          )"
+
+          publish_response="$(curl --fail --silent --show-error -u app:app -H "content-type: application/json" --data "$invalid_request" "http://localhost:15674/api/exchanges/%2F/crypto.ledger.events/publish")"
+          printf '%s' "$publish_response" | grep -F '"routed":true' > /dev/null
+
+          for attempt in {1..30}; do
+            dlq_message_count="$(curl --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections.dlq | python3 -c 'import json, sys; print(json.load(sys.stdin).get("messages", 0))' || true)"
+
+            if test "${dlq_message_count:-0}" -ge 1 2>/dev/null; then
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          docker compose logs
+          exit 1
+      - name: Process valid order event
+        run: |
+          set -euo pipefail
+
+          order_id="ci-order-$(date +%s)"
+          event="$(python3 - "$order_id" <<'PY'
+          import json
+          import sys
+
+          order_id = sys.argv[1]
+          print(json.dumps({
+              "event_key": "ci.created:" + order_id,
+              "event_type": "order.created",
+              "occurred_at": "2026-06-27T18:30:00Z",
+              "payload": {
+                  "order_id": order_id,
+                  "user_id": "ci-user-1",
+                  "side": "buy",
+                  "base_asset_code": "BTC",
+                  "quote_asset_code": "USDT",
+                  "reserved_asset_code": "USDT",
+                  "reserved_amount": "20.000",
+              },
+          }))
+          PY
+          )"
+
+          request="$(python3 - "$event" <<'PY'
+          import json
+          import sys
+
+          print(json.dumps({
+              "properties": {},
+              "routing_key": "order.created",
+              "payload": sys.argv[1],
+              "payload_encoding": "string",
+          }))
+          PY
+          )"
+
           publish_response="$(curl --fail --silent --show-error -u app:app -H "content-type: application/json" --data "$request" "http://localhost:15674/api/exchanges/%2F/crypto.ledger.events/publish")"
           printf '%s' "$publish_response" | grep -F '"routed":true' > /dev/null
-          for attempt in {1..20}; do
-            response="$(curl --fail --silent http://localhost:8084/v1/orders/order-1 || true)"
+
+          for attempt in {1..30}; do
+            response="$(curl --fail --silent http://localhost:8084/v1/orders/$order_id || true)"
+
             if printf '%s' "$response" | grep -F '"status":"open"' > /dev/null; then
               exit 0
             fi
+
             sleep 1
           done
+
           docker compose logs
           exit 1
       - name: Stop stack
