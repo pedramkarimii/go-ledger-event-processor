@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/pedramkarimii/go-ledger-event-processor/internal/projection"
@@ -43,50 +44,80 @@ func New(config Config, applier ProjectionApplier) (*Worker, error) {
 }
 
 func (worker *Worker) Run(ctx context.Context) error {
+	attempt := 0
+
+	for {
+		connected, err := worker.runSession(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		if err == nil {
+			err = fmt.Errorf("RabbitMQ session ended unexpectedly")
+		}
+
+		if connected {
+			attempt = 0
+		}
+
+		delay := reconnectDelay(attempt)
+		log.Printf("RabbitMQ consumer reconnecting in %s after: %v", delay, err)
+
+		if !waitForReconnect(ctx, delay) {
+			return nil
+		}
+
+		attempt++
+	}
+}
+
+func (worker *Worker) runSession(ctx context.Context) (bool, error) {
 	connection, err := amqp.Dial(worker.config.URL)
 	if err != nil {
-		return fmt.Errorf("connect to RabbitMQ: %w", err)
+		return false, fmt.Errorf("connect to RabbitMQ: %w", err)
 	}
 	defer connection.Close()
 
 	channel, err := connection.Channel()
 	if err != nil {
-		return fmt.Errorf("open RabbitMQ channel: %w", err)
+		return false, fmt.Errorf("open RabbitMQ channel: %w", err)
 	}
 	defer channel.Close()
 
 	if err := channel.ExchangeDeclare(worker.config.Exchange, "topic", true, false, false, false, nil); err != nil {
-		return fmt.Errorf("declare RabbitMQ exchange: %w", err)
+		return false, fmt.Errorf("declare RabbitMQ exchange: %w", err)
 	}
 
 	queue, err := channel.QueueDeclare(worker.config.Queue, true, false, false, false, nil)
 	if err != nil {
-		return fmt.Errorf("declare RabbitMQ queue: %w", err)
+		return false, fmt.Errorf("declare RabbitMQ queue: %w", err)
 	}
 
 	if err := channel.QueueBind(queue.Name, "order.*", worker.config.Exchange, false, nil); err != nil {
-		return fmt.Errorf("bind RabbitMQ queue: %w", err)
+		return false, fmt.Errorf("bind RabbitMQ queue: %w", err)
 	}
 
 	if err := channel.Qos(1, 0, false); err != nil {
-		return fmt.Errorf("configure RabbitMQ QoS: %w", err)
+		return false, fmt.Errorf("configure RabbitMQ QoS: %w", err)
 	}
 
 	deliveries, err := channel.Consume(queue.Name, "", false, false, false, false, nil)
 	if err != nil {
-		return fmt.Errorf("start RabbitMQ consumer: %w", err)
+		return false, fmt.Errorf("start RabbitMQ consumer: %w", err)
 	}
+
+	log.Printf("RabbitMQ consumer connected to queue %s", queue.Name)
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return true, nil
 		case delivery, open := <-deliveries:
 			if !open {
-				return fmt.Errorf("RabbitMQ delivery channel closed")
+				return true, fmt.Errorf("RabbitMQ delivery channel closed")
 			}
 			if err := worker.process(ctx, delivery); err != nil {
-				return err
+				return true, fmt.Errorf("process RabbitMQ delivery: %w", err)
 			}
 		}
 	}
@@ -108,11 +139,13 @@ func (worker *Worker) process(ctx context.Context, delivery amqp.Delivery) error
 
 func DecodeOrderEvent(body []byte) (projection.OrderEvent, error) {
 	var event projection.OrderEvent
+
 	if err := json.Unmarshal(body, &event); err != nil {
 		return projection.OrderEvent{}, fmt.Errorf("decode order event: %w", err)
 	}
 	if err := event.Validate(); err != nil {
 		return projection.OrderEvent{}, err
 	}
+
 	return event, nil
 }
