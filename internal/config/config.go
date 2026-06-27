@@ -7,12 +7,11 @@ import (
 )
 
 type Config struct {
-	HTTPAddr        string
-	DatabaseURL     string
-	RabbitMQURL     string
-RabbitMQExchange string
-	RabitMQExchange string
-	RabbitMQQueue   string
+	HTTPAddr         string
+	DatabaseURL      string
+	RabbitMQURL      string
+	RabbitMQExchange string
+	RabbitMQQueue    string
 }
 
 func Load() (Config, error) {
@@ -20,7 +19,6 @@ func Load() (Config, error) {
 		HTTPAddr:         valueOrDefault("HTTP_ADDR", ":8080"),
 		DatabaseURL:      strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		RabbitMQURL:      strings.TrimSpace(os.Getenv("RABBITMQ_URL")),
-RabbitMQExchange string
 		RabbitMQExchange: valueOrDefault("RABBITMQ_EXCHANGE", "crypto.ledger.events"),
 		RabbitMQQueue:    valueOrDefault("RABBITMQ_QUEUE", "go-ledger-order-projections"),
 	}
