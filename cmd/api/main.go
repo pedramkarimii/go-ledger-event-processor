@@ -1,24 +1,23 @@
 package main
 
 import (
-	"errors"
 	"log"
-	"net/http"
 
 	"github.com/pedramkarimii/go-ledger-event-processor/internal/config"
 	"github.com/pedramkarimii/go-ledger-event-processor/internal/httpapi"
+	"github.com/pedramkarimii/go-ledger-event-processor/internal/projection"
 )
 
 func main() {
-	config, err := config.Load()
+	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	server := httpapi.NewServer(config.HTTPAddr, httpapi.NewRouter())
-	log.Printf("HTTP API listening on %s", config.HTTPAddr)
+	store := projection.NewInMemoryStore()
+	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.NewRouter(store))
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
-	}
+	log.Printf("HTTP server listening on %s", cfg.HTTPAddr)
+	log.Fatal(server.ListenAndServe())
+
 }

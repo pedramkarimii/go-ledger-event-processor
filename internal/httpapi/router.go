@@ -6,31 +6,42 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pedramkarimii/go-ledger-event-processor/internal/projection"
 )
 
-func NewRouter() http.Handler {
+type OrderReader interface {
+	Get(orderID string) (projection.OrderProjection, bool)
+}
+
+func NewRouter(orders OrderReader) http.Handler {
 	router := chi.NewRouter()
 
-	router.Get("/health", func(writer http.ResponseWriter, request *http.Request) {
-		writeJSON(writer, http.StatusOK, map[string]string{
+	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{
 			"service": "go-ledger-event-processor",
 			"status":  "ok",
 		})
 	})
 
-	router.Get("/ready", func(writer http.ResponseWriter, request *http.Request) {
-		writeJSON(writer, http.StatusOK, map[string]string{
-			"status": "ready",
-		})
+	router.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
+
+	router.Get("/v1/orders/{orderID}", func(w http.ResponseWriter, r *http.Request) {
+		orderID := chi.URLParam(r, "orderID")
+		order, exists := orders.Get(orderID)
+		if !exists {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "order not found",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, order)
 	})
 
 	return router
-}
 
-func writeJSON(writer http.ResponseWriter, status int, value any) {
-	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(value)
 }
 
 func NewServer(address string, handler http.Handler) *http.Server {
@@ -39,4 +50,10 @@ func NewServer(address string, handler http.Handler) *http.Server {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
