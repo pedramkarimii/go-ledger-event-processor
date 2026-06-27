@@ -16,9 +16,11 @@ type ProjectionApplier interface {
 }
 
 type Config struct {
-	URL      string
-	Exchange string
-	Queue    string
+	URL                string
+	Exchange           string
+	Queue              string
+	DeadLetterExchange string
+	DeadLetterQueue    string
 }
 
 type Worker struct {
@@ -35,6 +37,12 @@ func New(config Config, applier ProjectionApplier) (*Worker, error) {
 	}
 	if strings.TrimSpace(config.Queue) == "" {
 		return nil, fmt.Errorf("RABBITMQ_QUEUE must not be empty")
+	}
+	if strings.TrimSpace(config.DeadLetterExchange) == "" {
+		return nil, fmt.Errorf("dead-letter exchange must not be empty")
+	}
+	if strings.TrimSpace(config.DeadLetterQueue) == "" {
+		return nil, fmt.Errorf("dead-letter queue must not be empty")
 	}
 	if applier == nil {
 		return nil, fmt.Errorf("projection applier must not be nil")
@@ -88,7 +96,27 @@ func (worker *Worker) runSession(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("declare RabbitMQ exchange: %w", err)
 	}
 
-	queue, err := channel.QueueDeclare(worker.config.Queue, true, false, false, false, nil)
+	if err := channel.ExchangeDeclare(worker.config.DeadLetterExchange, "topic", true, false, false, false, nil); err != nil {
+		return false, fmt.Errorf("declare RabbitMQ dead-letter exchange: %w", err)
+	}
+
+	deadLetterQueue, err := channel.QueueDeclare(worker.config.DeadLetterQueue, true, false, false, false, nil)
+	if err != nil {
+		return false, fmt.Errorf("declare RabbitMQ dead-letter queue: %w", err)
+	}
+
+	if err := channel.QueueBind(deadLetterQueue.Name, "#", worker.config.DeadLetterExchange, false, nil); err != nil {
+		return false, fmt.Errorf("bind RabbitMQ dead-letter queue: %w", err)
+	}
+
+	queue, err := channel.QueueDeclare(
+		worker.config.Queue,
+		true,
+		false,
+		false,
+		false,
+		amqp.Table{"x-dead-letter-exchange": worker.config.DeadLetterExchange},
+	)
 	if err != nil {
 		return false, fmt.Errorf("declare RabbitMQ queue: %w", err)
 	}
