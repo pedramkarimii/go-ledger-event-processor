@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/pedramkarimii/go-ledger-event-processor/internal/config"
 	"github.com/pedramkarimii/go-ledger-event-processor/internal/consumer"
@@ -10,12 +13,15 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	pool, err := storage.OpenPool(context.Background(), cfg.DatabaseURL)
+	pool, err := storage.OpenPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -31,7 +37,7 @@ func main() {
 	}
 
 	log.Printf("RabbitMQ consumer listening on queue %s", cfg.RabbitMQQueue)
-	if err := worker.Run(context.Background()); err != nil {
+	if err := worker.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
