@@ -1,0 +1,118 @@
+package consumer
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/pedramkarimii/go-ledger-event-processor/internal/projection"
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+type ProjectionApplier interface {
+	Apply(ctx context.Context, event projection.OrderEvent) (projection.OrderProjection, bool, error)
+}
+
+type Config struct {
+	URL      string
+	Exchange string
+	Queue    string
+}
+
+type Worker struct {
+	config  Config
+	applier ProjectionApplier
+}
+
+func New(config Config, applier ProjectionApplier) (*Worker, error) {
+	if strings.TrimSpace(config.URL) == "" {
+		return nil, fmt.Errorf("RABBITMQ_URL must not be empty")
+	}
+	if strings.TrimSpace(config.Exchange) == "" {
+		return nil, fmt.Errorf("RABBITMQ_EXCHANGE must not be empty")
+	}
+	if strings.TrimSpace(config.Queue) == "" {
+		return nil, fmt.Errorf("RABBITMQ_QUEUE must not be empty")
+	}
+	if applier == nil {
+		return nil, fmt.Errorf("projection applier must not be nil")
+	}
+
+	return &Worker{config: config, applier: applier}, nil
+}
+
+func (worker *Worker) Run(ctx context.Context) error {
+	connection, err := amqp.Dial(worker.config.URL)
+	if err != nil {
+		return fmt.Errorf("connect to RabbitMQ: %w", err)
+	}
+	defer connection.Close()
+
+	channel, err := connection.Channel()
+	if err != nil {
+		return fmt.Errorf("open RabbitMQ channel: %w", err)
+	}
+	defer channel.Close()
+
+	if err := channel.ExchangeDeclare(worker.config.Exchange, "topic", true, false, false, false, nil); err != nil {
+		return fmt.Errorf("declare RabbitMQ exchange: %w", err)
+	}
+
+	queue, err := channel.QueueDeclare(worker.config.Queue, true, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("declare RabbitMQ queue: %w", err)
+	}
+
+	if err := channel.QueueBind(queue.Name, "order.*", worker.config.Exchange, false, nil); err != nil {
+		return fmt.Errorf("bind RabbitMQ queue: %w", err)
+	}
+
+	if err := channel.Qos(1, 0, false); err != nil {
+		return fmt.Errorf("configure RabbitMQ QoS: %w", err)
+	}
+
+	deliveries, err := channel.Consume(queue.Name, "", false, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("start RabbitMQ consumer: %w", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case delivery, open := <-deliveries:
+			if !open {
+				return fmt.Errorf("RabbitMQ delivery channel closed")
+			}
+			if err := worker.process(ctx, delivery); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (worker *Worker) process(ctx context.Context, delivery amqp.Delivery) error {
+	event, err := DecodeOrderEvent(delivery.Body)
+	if err != nil {
+		return delivery.Reject(false)
+	}
+
+	_, _, err = worker.applier.Apply(ctx, event)
+	if err != nil {
+		return delivery.Nack(false, true)
+	}
+
+	return delivery.Ack(false)
+}
+
+func DecodeOrderEvent(body []byte) (projection.OrderEvent, error) {
+	var event projection.OrderEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		return projection.OrderEvent{}, fmt.Errorf("decode order event: %w", err)
+	}
+	if err := event.Validate(); err != nil {
+		return projection.OrderEvent{}, err
+	}
+	return event, nil
+}
