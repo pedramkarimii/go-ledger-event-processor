@@ -1,1 +1,140 @@
 # Go Ledger Event Processor
+
+Go service for idempotent RabbitMQ order-event processing, PostgreSQL projections, and a read API.
+
+## Overview
+
+The service consumes `order.created` and `order.canceled` events, records each `event_key` once, updates an order projection in the same PostgreSQL transaction, and exposes the projection through HTTP.
+
+```text
+RabbitMQ events
+      |
+      v
+Go consumer
+      |
+      v
+PostgreSQL: processed_events + order_projections
+      |
+      v
+Go read API
+```
+
+## Reliability behavior
+
+* Uses manual RabbitMQ acknowledgements.
+* Acknowledges a message only after PostgreSQL processing succeeds.
+* Rejects invalid JSON or invalid event payloads without requeueing.
+* Requeues messages when projection processing fails.
+* Uses `processed_events.event_key` as the idempotency key.
+* Writes the processed-event record and order projection in one PostgreSQL transaction.
+
+## Supported events
+
+### order.created
+
+```json
+{
+  "event_key": "order.created:order-1",
+  "event_type": "order.created",
+  "occurred_at": "2026-06-27T16:30:00Z",
+  "payload": {
+    "order_id": "order-1",
+    "user_id": "user-1",
+    "side": "buy",
+    "base_asset_code": "BTC",
+    "quote_asset_code": "USDT",
+    "reserved_asset_code": "USDT",
+    "reserved_amount": "20.000"
+  }
+}
+```
+
+### order.canceled
+
+```json
+{
+  "event_key": "order.canceled:order-1",
+  "event_type": "order.canceled",
+  "occurred_at": "2026-06-27T16:31:00Z",
+  "payload": {
+    "order_id": "order-1"
+  }
+}
+```
+
+## Run locally
+
+Requirements: Go 1.25+, Docker Engine, and Docker Compose.
+
+```bash
+docker compose up -d --build
+```
+
+| Service             | Address                  |
+| ------------------- | ------------------------ |
+| HTTP API            | `http://localhost:8084`  |
+| PostgreSQL          | `localhost:5434`         |
+| RabbitMQ AMQP       | `localhost:5674`         |
+| RabbitMQ Management | `http://localhost:15674` |
+
+RabbitMQ credentials: `app` / `app`.
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs -f api consumer
+docker compose down -v
+```
+
+## API
+
+```text
+GET /health
+GET /ready
+GET /v1/orders/{orderID}
+```
+
+Example:
+
+```bash
+curl http://localhost:8084/v1/orders/order-1
+```
+
+## Tests
+
+```bash
+go test ./...
+go vet ./...
+```
+
+Run PostgreSQL integration tests against the local stack:
+
+```bash
+env TEST_DATABASE_URL="postgres://processor:processor@localhost:5434/ledger_processor?sslmode=disable" go test ./internal/storage -v
+```
+
+## Continuous integration
+
+GitHub Actions runs:
+
+* formatting, module consistency, `go vet`, and unit tests;
+* Docker Compose validation;
+* a Docker end-to-end test that publishes `order.created` to RabbitMQ and verifies the API projection.
+
+## Project structure
+
+```text
+cmd/api                 HTTP API entry point
+cmd/consumer            RabbitMQ consumer entry point
+internal/config         Environment configuration
+internal/consumer       Event decoding and delivery handling
+internal/httpapi        HTTP routing and JSON responses
+internal/projection     Event model and in-memory test store
+internal/storage        PostgreSQL pool and projection store
+migrations              PostgreSQL schema initialization
+```
+
+## Scope
+
+This repository focuses on reliable order projections. Natural next additions include reconnect handling, dead-letter queues, structured logs, metrics, tracing, and production migration management.
