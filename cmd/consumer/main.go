@@ -28,9 +28,11 @@ func main() {
 	defer pool.Close()
 
 	worker, err := consumer.New(consumer.Config{
-		URL:      cfg.RabbitMQURL,
-		Exchange: cfg.RabbitMQExchange,
-		Queue:    cfg.RabbitMQQueue,
+		URL:                cfg.RabbitMQURL,
+		Exchange:           cfg.RabbitMQExchange,
+		Queue:              cfg.RabbitMQQueue,
+		DeadLetterExchange: cfg.RabbitMQExchange + ".dlx",
+		DeadLetterQueue:    cfg.RabbitMQQueue + ".dlq",
 	}, storage.NewProjectionStore(pool))
 	if err != nil {
 		log.Fatal(err)
