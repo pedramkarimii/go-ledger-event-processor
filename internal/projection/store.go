@@ -1,6 +1,7 @@
 package projection
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -90,12 +91,12 @@ func (store *InMemoryStore) Apply(event OrderEvent) (OrderProjection, bool, erro
 	return order, true, nil
 }
 
-func (store *InMemoryStore) Get(orderID string) (OrderProjection, bool) {
+func (store *InMemoryStore) Get(_ context.Context, orderID string) (OrderProjection, bool, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 
 	order, exists := store.orders[orderID]
-	return order, exists
+	return order, exists, nil
 }
 
 func (store *InMemoryStore) ProcessedCount() int {

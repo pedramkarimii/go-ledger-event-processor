@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -10,7 +11,7 @@ import (
 )
 
 type OrderReader interface {
-	Get(orderID string) (projection.OrderProjection, bool)
+	Get(ctx context.Context, orderID string) (projection.OrderProjection, bool, error)
 }
 
 func NewRouter(orders OrderReader) http.Handler {
@@ -29,7 +30,13 @@ func NewRouter(orders OrderReader) http.Handler {
 
 	router.Get("/v1/orders/{orderID}", func(w http.ResponseWriter, r *http.Request) {
 		orderID := chi.URLParam(r, "orderID")
-		order, exists := orders.Get(orderID)
+		order, exists, err := orders.Get(r.Context(), orderID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "could not load order",
+			})
+			return
+		}
 		if !exists {
 			writeJSON(w, http.StatusNotFound, map[string]string{
 				"error": "order not found",
@@ -41,7 +48,6 @@ func NewRouter(orders OrderReader) http.Handler {
 	})
 
 	return router
-
 }
 
 func NewServer(address string, handler http.Handler) *http.Server {
