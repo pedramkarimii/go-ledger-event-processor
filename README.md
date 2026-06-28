@@ -146,6 +146,21 @@ Example:
 curl http://localhost:8084/v1/orders/order-1
 ```
 
+## Local benchmark
+
+Observed on the local development machine with Docker Compose. These are reproducible engineering measurements, not a production SLA or a hardware-independent capacity claim.
+
+Largest completed order-pipeline run:
+
+* 20,000 unique persistent `order.created` events published through RabbitMQ with 32 publisher channels.
+* 20,000 processed-event records and 20,000 order projections persisted successfully; no event loss was observed.
+* End-to-end throughput: **144.18 completed orders/s** from RabbitMQ publish through PostgreSQL projection.
+* RabbitMQ ingress during the publish phase: **21,675.90 messages/s**. This measures broker ingress only, not end-to-end consumer capacity.
+* API read run: 50,000 successful `GET /v1/orders/{orderID}` requests with 200 concurrent clients reached **3,564.48 requests/s**; p50 46.008 ms, p95 113.155 ms, and p99 175.717 ms.
+* Benchmark rows were removed after the run.
+
+The current pipeline uses one consumer with `QoS=1` and one PostgreSQL transaction per event. A rate-controlled 500,000-event capacity sweep is tracked in the performance issue below before making a sustained-capacity or production-sizing claim.
+
 ## Tests
 
 ```bash
