@@ -29,6 +29,17 @@ Go read API
 * Writes the processed-event record and order projection in one PostgreSQL transaction.
 * Handles `SIGINT` and `SIGTERM` for graceful consumer shutdown.
 
+## Health and readiness
+
+`GET /health` confirms that the API process is running.
+
+`GET /ready` verifies that both runtime dependencies are usable at request time:
+
+* PostgreSQL responds to a pool ping.
+* RabbitMQ accepts a short AMQP connection and authentication handshake.
+
+When either dependency is unavailable, `/ready` returns HTTP `503` with `{"status":"not_ready"}`. It returns HTTP `200` with `{"status":"ready"}` only when both checks pass.
+
 ## Observability
 
 Both processes write structured JSON logs to standard output.
@@ -86,14 +97,16 @@ Requirements: Go 1.25+, Docker Engine, and Docker Compose.
 docker compose up -d --build
 ```
 
-| Service                  | Address                  |
-| ------------------------ | ------------------------ |
-| HTTP API                 | `http://localhost:8084`  |
-| API metrics              | `http://localhost:8084/metrics` |
-| Consumer metrics         | `http://localhost:8085/metrics` |
-| PostgreSQL               | `localhost:5434`         |
-| RabbitMQ AMQP            | `localhost:5674`         |
-| RabbitMQ Management      | `http://localhost:15674` |
+| Service             | Address                         |
+| ------------------- | ------------------------------- |
+| HTTP API            | `http://localhost:8084`         |
+| API health          | `http://localhost:8084/health`  |
+| API readiness       | `http://localhost:8084/ready`   |
+| API metrics         | `http://localhost:8084/metrics` |
+| Consumer metrics    | `http://localhost:8085/metrics` |
+| PostgreSQL          | `localhost:5434`                |
+| RabbitMQ AMQP       | `localhost:5674`                |
+| RabbitMQ Management | `http://localhost:15674`        |
 
 RabbitMQ credentials: `app` / `app`.
 
@@ -111,6 +124,8 @@ Useful commands:
 ```bash
 docker compose ps
 docker compose logs -f api consumer
+curl http://localhost:8084/health
+curl http://localhost:8084/ready
 curl http://localhost:8084/metrics
 curl http://localhost:8085/metrics
 docker compose down -v
@@ -150,7 +165,8 @@ GitHub Actions runs:
 
 * formatting, module consistency, `go vet`, and unit tests;
 * Docker Compose validation;
-* a Docker end-to-end test that verifies the API, RabbitMQ topology, and consumer metrics endpoint;
+* a Docker end-to-end test that verifies health, real readiness, RabbitMQ topology, and the consumer metrics endpoint;
+* readiness failure and recovery while RabbitMQ and PostgreSQL are stopped and restarted;
 * invalid-event routing to the DLQ plus the consumer rejection counter;
 * valid `order.created` processing plus the API projection and consumer success counter.
 
@@ -161,7 +177,8 @@ cmd/api                 HTTP API entry point
 cmd/consumer            RabbitMQ consumer and metrics entry point
 internal/config         Environment configuration
 internal/consumer       Event decoding, delivery handling, and consumer metrics
-internal/httpapi        HTTP routing, API metrics, and JSON responses
+internal/httpapi        HTTP routing, API metrics, readiness response, and JSON responses
+internal/readiness      PostgreSQL and RabbitMQ readiness checks
 internal/projection     Event model and in-memory test store
 internal/storage        PostgreSQL pool and projection store
 migrations              PostgreSQL schema initialization
@@ -169,4 +186,4 @@ migrations              PostgreSQL schema initialization
 
 ## Scope
 
-This repository focuses on reliable order projections with local observability. Natural next additions include distributed tracing, alerting rules, metric scraping configuration, and production migration management.
+This repository focuses on reliable order projections with local observability and dependency-aware readiness. Natural next additions include distributed tracing, alerting rules, metric scraping configuration, and production migration management.

@@ -40,17 +40,19 @@ jobs:
         run: docker compose config
       - name: Start stack
         run: docker compose up -d --build
-      - name: Wait for API, consumer metrics, and RabbitMQ topology
+      - name: Wait for API readiness, consumer metrics, and RabbitMQ topology
         run: |
           set -euo pipefail
 
           for attempt in {1..45}; do
-            api_ready="$(curl --fail --silent http://localhost:8084/health || true)"
+            api_health="$(curl --fail --silent http://localhost:8084/health || true)"
+            api_ready="$(curl --fail --silent http://localhost:8084/ready || true)"
             consumer_metrics="$(curl --fail --silent http://localhost:8085/metrics || true)"
             projection_queue="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections || true)"
             dead_letter_queue="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections.dlq || true)"
 
-            if printf '%s' "$api_ready" | grep -F '"status":"ok"' > /dev/null \
+            if printf '%s' "$api_health" | grep -F '"status":"ok"' > /dev/null \
+              && printf '%s' "$api_ready" | grep -F '"status":"ready"' > /dev/null \
               && printf '%s' "$consumer_metrics" | grep -F '# TYPE consumer_events_total counter' > /dev/null \
               && printf '%s' "$projection_queue" | grep -F '"name":"go-ledger-order-projections"' > /dev/null \
               && printf '%s' "$dead_letter_queue" | grep -F '"name":"go-ledger-order-projections.dlq"' > /dev/null; then
@@ -62,6 +64,58 @@ jobs:
 
           docker compose logs
           exit 1
+      - name: Verify readiness tracks PostgreSQL and RabbitMQ
+        run: |
+          set -euo pipefail
+
+          wait_for_not_ready() {
+            local dependency="$1"
+
+            for attempt in {1..20}; do
+              response_file="$(mktemp)"
+              status="$(curl --silent --output "$response_file" --write-out '%{http_code}' http://localhost:8084/ready || true)"
+
+              if test "$status" = "503" && grep -F '"status":"not_ready"' "$response_file" > /dev/null; then
+                rm -f "$response_file"
+                return 0
+              fi
+
+              rm -f "$response_file"
+              sleep 1
+            done
+
+            echo "API did not become not_ready after stopping $dependency." >&2
+            docker compose logs
+            exit 1
+          }
+
+          wait_for_ready() {
+            local dependency="$1"
+
+            for attempt in {1..40}; do
+              response="$(curl --fail --silent http://localhost:8084/ready || true)"
+
+              if printf '%s' "$response" | grep -F '"status":"ready"' > /dev/null; then
+                return 0
+              fi
+
+              sleep 1
+            done
+
+            echo "API did not recover readiness after starting $dependency." >&2
+            docker compose logs
+            exit 1
+          }
+
+          docker compose stop rabbitmq
+          wait_for_not_ready RabbitMQ
+          docker compose start rabbitmq
+          wait_for_ready RabbitMQ
+
+          docker compose stop postgres
+          wait_for_not_ready PostgreSQL
+          docker compose start postgres
+          wait_for_ready PostgreSQL
       - name: Route invalid event to DLQ and count rejection
         run: |
           set -euo pipefail
@@ -110,7 +164,7 @@ jobs:
           print(json.dumps({
               "event_key": "ci.created:" + order_id,
               "event_type": "order.created",
-              "occurred_at": "2026-06-27T18:30:00Z",
+              "occurred_at": "2026-06-28T03:30:00Z",
               "payload": {
                   "order_id": order_id,
                   "user_id": "ci-user-1",
