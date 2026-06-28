@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -14,7 +15,24 @@ type OrderReader interface {
 	Get(ctx context.Context, orderID string) (projection.OrderProjection, bool, error)
 }
 
-func NewRouter(orders OrderReader) http.Handler {
+type ReadinessChecker interface {
+	Check(context.Context) error
+}
+
+type readinessFunc func(context.Context) error
+
+func (check readinessFunc) Check(ctx context.Context) error {
+	return check(ctx)
+}
+
+func NewRouter(orders OrderReader, checks ...ReadinessChecker) http.Handler {
+	readinessCheck := ReadinessChecker(readinessFunc(func(context.Context) error {
+		return nil
+	}))
+	if len(checks) > 0 && checks[0] != nil {
+		readinessCheck = checks[0]
+	}
+
 	router := chi.NewRouter()
 	metrics := NewHTTPMetrics()
 
@@ -29,6 +47,14 @@ func NewRouter(orders OrderReader) http.Handler {
 	})
 
 	router.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if err := readinessCheck.Check(r.Context()); err != nil {
+			slog.Warn("API readiness check failed", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+			})
+			return
+		}
+
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
