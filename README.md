@@ -8,25 +8,41 @@ The service consumes `order.created` and `order.canceled` events, records each `
 
 ```text
 RabbitMQ events
-      |
-      v
+|
+v
 Go consumer
-      |
-      v
+|
+v
 PostgreSQL: processed_events + order_projections
-      |
-      v
+|
+v
 Go read API
 ```
 
 ## Reliability behavior
 
-* Uses manual RabbitMQ acknowledgements.
-* Acknowledges a message only after PostgreSQL processing succeeds.
-* Rejects invalid JSON or invalid event payloads without requeueing.
+* Uses manual RabbitMQ acknowledgements and acknowledges only after PostgreSQL processing succeeds.
+* Rejects invalid JSON or invalid event payloads without requeueing; RabbitMQ routes them to a durable dead-letter queue (DLQ).
 * Requeues messages when projection processing fails.
+* Reconnects after RabbitMQ connection or delivery-channel failures with capped exponential backoff.
 * Uses `processed_events.event_key` as the idempotency key.
 * Writes the processed-event record and order projection in one PostgreSQL transaction.
+* Handles `SIGINT` and `SIGTERM` for graceful consumer shutdown.
+
+## Observability
+
+Both processes write structured JSON logs to standard output.
+
+The API exposes request counters in Prometheus text format at `GET /metrics`:
+
+* `http_requests_total{method,route,status}`
+
+The consumer exposes event counters in Prometheus text format at its own metrics address:
+
+* `consumer_events_total{outcome="processed|rejected|requeued"}`
+* `consumer_reconnects_total`
+
+A rejected invalid event increments the consumer `rejected` counter and is placed in the DLQ. A successfully projected event increments the `processed` counter.
 
 ## Supported events
 
@@ -70,20 +86,33 @@ Requirements: Go 1.25+, Docker Engine, and Docker Compose.
 docker compose up -d --build
 ```
 
-| Service             | Address                  |
-| ------------------- | ------------------------ |
-| HTTP API            | `http://localhost:8084`  |
-| PostgreSQL          | `localhost:5434`         |
-| RabbitMQ AMQP       | `localhost:5674`         |
-| RabbitMQ Management | `http://localhost:15674` |
+| Service                  | Address                  |
+| ------------------------ | ------------------------ |
+| HTTP API                 | `http://localhost:8084`  |
+| API metrics              | `http://localhost:8084/metrics` |
+| Consumer metrics         | `http://localhost:8085/metrics` |
+| PostgreSQL               | `localhost:5434`         |
+| RabbitMQ AMQP            | `localhost:5674`         |
+| RabbitMQ Management      | `http://localhost:15674` |
 
 RabbitMQ credentials: `app` / `app`.
+
+The default RabbitMQ topology is:
+
+| Resource | Name |
+| --- | --- |
+| Event exchange | `crypto.ledger.events` |
+| Projection queue | `go-ledger-order-projections` |
+| Dead-letter exchange | `crypto.ledger.events.dlx` |
+| Dead-letter queue | `go-ledger-order-projections.dlq` |
 
 Useful commands:
 
 ```bash
 docker compose ps
 docker compose logs -f api consumer
+curl http://localhost:8084/metrics
+curl http://localhost:8085/metrics
 docker compose down -v
 ```
 
@@ -92,6 +121,7 @@ docker compose down -v
 ```text
 GET /health
 GET /ready
+GET /metrics
 GET /v1/orders/{orderID}
 ```
 
@@ -120,16 +150,18 @@ GitHub Actions runs:
 
 * formatting, module consistency, `go vet`, and unit tests;
 * Docker Compose validation;
-* a Docker end-to-end test that publishes `order.created` to RabbitMQ and verifies the API projection.
+* a Docker end-to-end test that verifies the API, RabbitMQ topology, and consumer metrics endpoint;
+* invalid-event routing to the DLQ plus the consumer rejection counter;
+* valid `order.created` processing plus the API projection and consumer success counter.
 
 ## Project structure
 
 ```text
 cmd/api                 HTTP API entry point
-cmd/consumer            RabbitMQ consumer entry point
+cmd/consumer            RabbitMQ consumer and metrics entry point
 internal/config         Environment configuration
-internal/consumer       Event decoding and delivery handling
-internal/httpapi        HTTP routing and JSON responses
+internal/consumer       Event decoding, delivery handling, and consumer metrics
+internal/httpapi        HTTP routing, API metrics, and JSON responses
 internal/projection     Event model and in-memory test store
 internal/storage        PostgreSQL pool and projection store
 migrations              PostgreSQL schema initialization
@@ -137,4 +169,4 @@ migrations              PostgreSQL schema initialization
 
 ## Scope
 
-This repository focuses on reliable order projections. Natural next additions include reconnect handling, dead-letter queues, structured logs, metrics, tracing, and production migration management.
+This repository focuses on reliable order projections with local observability. Natural next additions include distributed tracing, alerting rules, metric scraping configuration, and production migration management.
