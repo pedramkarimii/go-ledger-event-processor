@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/pedramkarimii/go-ledger-event-processor/internal/projection"
@@ -26,6 +26,7 @@ type Config struct {
 type Worker struct {
 	config  Config
 	applier ProjectionApplier
+	metrics *Metrics
 }
 
 func New(config Config, applier ProjectionApplier) (*Worker, error) {
@@ -48,7 +49,15 @@ func New(config Config, applier ProjectionApplier) (*Worker, error) {
 		return nil, fmt.Errorf("projection applier must not be nil")
 	}
 
-	return &Worker{config: config, applier: applier}, nil
+	return &Worker{
+		config:  config,
+		applier: applier,
+		metrics: NewMetrics(),
+	}, nil
+}
+
+func (worker *Worker) Metrics() *Metrics {
+	return worker.metrics
 }
 
 func (worker *Worker) Run(ctx context.Context) error {
@@ -69,7 +78,8 @@ func (worker *Worker) Run(ctx context.Context) error {
 		}
 
 		delay := reconnectDelay(attempt)
-		log.Printf("RabbitMQ consumer reconnecting in %s after: %v", delay, err)
+		worker.metrics.IncReconnects()
+		slog.Warn("RabbitMQ consumer reconnecting", "delay", delay.String(), "error", err)
 
 		if !waitForReconnect(ctx, delay) {
 			return nil
@@ -134,7 +144,7 @@ func (worker *Worker) runSession(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("start RabbitMQ consumer: %w", err)
 	}
 
-	log.Printf("RabbitMQ consumer connected to queue %s", queue.Name)
+	slog.Info("RabbitMQ consumer connected", "queue", queue.Name)
 
 	for {
 		select {
@@ -154,15 +164,45 @@ func (worker *Worker) runSession(ctx context.Context) (bool, error) {
 func (worker *Worker) process(ctx context.Context, delivery amqp.Delivery) error {
 	event, err := DecodeOrderEvent(delivery.Body)
 	if err != nil {
-		return delivery.Reject(false)
+		if err := delivery.Reject(false); err != nil {
+			return err
+		}
+
+		worker.metrics.IncRejected()
+		slog.Warn("RabbitMQ event rejected", "reason", "invalid_event", "error", err)
+		return nil
 	}
 
-	_, _, err = worker.applier.Apply(ctx, event)
+	_, applied, err := worker.applier.Apply(ctx, event)
 	if err != nil {
-		return delivery.Nack(false, true)
+		if err := delivery.Nack(false, true); err != nil {
+			return err
+		}
+
+		worker.metrics.IncRequeued()
+		slog.Error(
+			"RabbitMQ event requeued",
+			"event_key", event.EventKey,
+			"event_type", event.EventType,
+			"order_id", event.Payload.OrderID,
+			"error", err,
+		)
+		return nil
 	}
 
-	return delivery.Ack(false)
+	if err := delivery.Ack(false); err != nil {
+		return err
+	}
+
+	worker.metrics.IncProcessed()
+	slog.Info(
+		"RabbitMQ event processed",
+		"event_key", event.EventKey,
+		"event_type", event.EventType,
+		"order_id", event.Payload.OrderID,
+		"applied", applied,
+	)
+	return nil
 }
 
 func DecodeOrderEvent(body []byte) (projection.OrderEvent, error) {

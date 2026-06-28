@@ -40,15 +40,18 @@ jobs:
         run: docker compose config
       - name: Start stack
         run: docker compose up -d --build
-      - name: Wait for API and RabbitMQ topology
+      - name: Wait for API, consumer metrics, and RabbitMQ topology
         run: |
           set -euo pipefail
+
           for attempt in {1..45}; do
             api_ready="$(curl --fail --silent http://localhost:8084/health || true)"
+            consumer_metrics="$(curl --fail --silent http://localhost:8085/metrics || true)"
             projection_queue="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections || true)"
             dead_letter_queue="$(curl --fail --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections.dlq || true)"
 
             if printf '%s' "$api_ready" | grep -F '"status":"ok"' > /dev/null \
+              && printf '%s' "$consumer_metrics" | grep -F '# TYPE consumer_events_total counter' > /dev/null \
               && printf '%s' "$projection_queue" | grep -F '"name":"go-ledger-order-projections"' > /dev/null \
               && printf '%s' "$dead_letter_queue" | grep -F '"name":"go-ledger-order-projections.dlq"' > /dev/null; then
               exit 0
@@ -59,7 +62,7 @@ jobs:
 
           docker compose logs
           exit 1
-      - name: Route invalid event to DLQ
+      - name: Route invalid event to DLQ and count rejection
         run: |
           set -euo pipefail
 
@@ -82,8 +85,10 @@ jobs:
 
           for attempt in {1..30}; do
             dlq_message_count="$(curl --silent -u app:app http://localhost:15674/api/queues/%2F/go-ledger-order-projections.dlq | python3 -c 'import json, sys; print(json.load(sys.stdin).get("messages", 0))' || true)"
+            consumer_metrics="$(curl --fail --silent http://localhost:8085/metrics || true)"
 
-            if test "${dlq_message_count:-0}" -ge 1 2>/dev/null; then
+            if test "${dlq_message_count:-0}" -ge 1 2>/dev/null \
+              && printf '%s' "$consumer_metrics" | grep -F 'consumer_events_total{outcome="rejected"} 1' > /dev/null; then
               exit 0
             fi
 
@@ -92,7 +97,7 @@ jobs:
 
           docker compose logs
           exit 1
-      - name: Process valid order event
+      - name: Process valid order event and count success
         run: |
           set -euo pipefail
 
@@ -137,8 +142,10 @@ jobs:
 
           for attempt in {1..30}; do
             response="$(curl --fail --silent http://localhost:8084/v1/orders/$order_id || true)"
+            consumer_metrics="$(curl --fail --silent http://localhost:8085/metrics || true)"
 
-            if printf '%s' "$response" | grep -F '"status":"open"' > /dev/null; then
+            if printf '%s' "$response" | grep -F '"status":"open"' > /dev/null \
+              && printf '%s' "$consumer_metrics" | grep -F 'consumer_events_total{outcome="processed"} 1' > /dev/null; then
               exit 0
             fi
 

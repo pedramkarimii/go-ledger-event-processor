@@ -16,6 +16,10 @@ type OrderReader interface {
 
 func NewRouter(orders OrderReader) http.Handler {
 	router := chi.NewRouter()
+	metrics := NewHTTPMetrics()
+
+	router.Use(metrics.Middleware)
+	router.Get("/metrics", metrics.Handler)
 
 	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
