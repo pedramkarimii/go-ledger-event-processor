@@ -148,18 +148,31 @@ curl http://localhost:8084/v1/orders/order-1
 
 ## Local benchmark
 
-Observed on the local development machine with Docker Compose. These are reproducible engineering measurements, not a production SLA or a hardware-independent capacity claim.
+The figures below are reproducible local Docker Compose measurements on the development machine. They are not a production SLA, a hardware-independent capacity claim, or a substitute for production load testing.
 
-Largest completed order-pipeline run:
+### Verified sustained order-pipeline rate
 
-* 20,000 unique persistent `order.created` events published through RabbitMQ with 32 publisher channels.
-* 20,000 processed-event records and 20,000 order projections persisted successfully; no event loss was observed.
-* End-to-end throughput: **144.18 completed orders/s** from RabbitMQ publish through PostgreSQL projection.
-* RabbitMQ ingress during the publish phase: **21,675.90 messages/s**. This measures broker ingress only, not end-to-end consumer capacity.
-* API read run: 50,000 successful `GET /v1/orders/{orderID}` requests with 200 concurrent clients reached **3,564.48 requests/s**; p50 46.008 ms, p95 113.155 ms, and p99 175.717 ms.
-* Benchmark rows were removed after the run.
+**120 end-to-end unique orders/s** is the highest verified stable input rate for the current architecture: one RabbitMQ consumer, `QoS=1`, persistent messages, manual acknowledgements after PostgreSQL processing, and one projection transaction per event.
 
-The current pipeline uses one consumer with `QoS=1` and one PostgreSQL transaction per event. A rate-controlled 500,000-event capacity sweep is tracked in the performance issue below before making a sustained-capacity or production-sizing claim.
+Method and result:
+
+- A rate-controlled run published **500,000** unique persistent `order.created` events in ascending stages of 100, 120, and 140 events/s.
+- A stage counted as stable only when outstanding work returned to **<=1,000 events within 20 seconds** after publishing stopped.
+- **100/s and 120/s settled successfully.**
+- **140/s did not settle**: backlog reached 11,658 after the stage, with a peak outstanding backlog of 13,172 events.
+- All **500,000** events were ultimately processed and all **500,000** order projections were persisted; no event loss was observed.
+- The full run, including recovery and final drain, completed at **115.95 orders/s** over 1h11m52s.
+
+A RabbitMQ publishing rate is not end-to-end processing capacity. Capacity improvements and repeated benchmark requirements are tracked in the linked performance issue.
+
+### API read baseline
+
+A separate local read test completed **50,000** successful `GET /v1/orders/{orderID}` requests with 200 concurrent clients:
+
+- **3,564.48 requests/s**
+- p50: **46.008 ms**
+- p95: **113.155 ms**
+- p99: **175.717 ms**
 
 ## Tests
 
